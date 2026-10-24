@@ -138,7 +138,8 @@ export class GoogleProvider extends Provider {
   private extractSystemPrompt(messages: Message[]): string | undefined {
     const sysMsg = messages.find((m) => m.role === MessageRole.SYSTEM);
     if (!sysMsg) return undefined;
-    return this.textContentToString(sysMsg);
+    const text = this.textContentToString(sysMsg);
+    return text.length > 0 ? text : undefined;
   }
 
   /** Last user text, or ' ' if none (Gemini rejects empty strings). */
