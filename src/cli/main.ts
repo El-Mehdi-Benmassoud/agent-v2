@@ -99,6 +99,14 @@ Examples:
               }
             });
 
+    // tui command
+    this.program
+      .command('tui')
+      .description('Start the interactive TUI (Ink-based terminal interface)')
+      .action(async () => {
+        await this.handleTui();
+      });
+
     // chat command
     this.program
       .command('chat [message...]')
@@ -206,6 +214,52 @@ Examples:
 
     request.deny(`User denied: ${answer}`);
     return false;
+  }
+
+  /**
+   * Launch the Ink TUI. Resumes the current session when one exists,
+   * otherwise creates one from config (same construction as chat).
+   * Requires raw-mode stdin: refuses with a clear message when piped.
+   */
+  private async handleTui(): Promise<void> {
+    if (!process.stdin.isTTY) {
+      console.error(chalk.red('The TUI needs a terminal (raw-mode stdin).'));
+      console.error(chalk.gray('Use `agent-v2 chat <message>` for piped input, or run this in a terminal.'));
+      return;
+    }
+
+    if (!this.sessionManager) {
+      this.sessionManager = new SessionManager({
+        requestApproval: this.handleApproval.bind(this),
+        hooks: this.getConfigManager().get().hooks,
+        skills: this.getConfigManager().get().skills,
+        skillRegistry: this.skillRegistry,
+      });
+    }
+
+    this.sessionManager.getCurrentSession();
+    const session = this.sessionManager.getCurrentSession();
+    if (!session) {
+      const config = this.getConfigManager().get();
+      try {
+        await this.sessionManager.createSession(
+          { ...config.model, apiKey: config.model.apiKey ?? process.env['ANTHROPIC_API_KEY'] ?? process.env['OPENAI_API_KEY'] ?? 'test-key' },
+          [],
+          {
+            workingDirectory: config.workspace.rootPath,
+            permissionMode: config.permissions.mode,
+          }
+        );
+      } catch (error) {
+        console.error(chalk.red(`Cannot create session: ${error instanceof Error ? error.message : String(error)}`));
+        console.error(chalk.gray('  Set your API key first: agent-v2 config set model.apiKey <key>'));
+        return;
+      }
+    }
+
+    // Mount the TUI. renderTUI takes over the terminal until the user exits.
+    const { renderTUI } = await import('../tui/render.js');
+    renderTUI(this.sessionManager);
   }
 
   private async handleChat(message: string, options: any): Promise<void> {
