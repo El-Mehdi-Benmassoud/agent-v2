@@ -13,6 +13,8 @@ import { makeAgentTool } from '../tools/agent.js';
 import { setAgentRegistry } from '../tools/index.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { spawn } from 'node:child_process';
 import {
   ModelConfig,
   ModelProvider,
@@ -629,7 +631,44 @@ Examples:
   }
 
   private handleSkillsInstall(name: string): void {
-    console.log(chalk.yellow(`Skill install ${name} - not yet implemented (use skills create or copy .md to configured paths)`));
+    if (!this.skillRegistry) {
+      console.log(chalk.yellow('Skills not configured. Enable in config: skills.enabled = true'));
+      return;
+    }
+    const config = this.getConfigManager().get();
+    const paths = config.skills?.paths ?? ['.agent-v2/skills', '~/.agent-v2/skills'];
+    const raw = paths[0] ?? '.agent-v2/skills';
+    const firstPath = raw.startsWith('~/')
+      ? join(homedir(), raw.slice(2))
+      : raw;
+
+    mkdirSync(firstPath, { recursive: true });
+    const targetPath = join(firstPath, `${name}.md`);
+
+    if (existsSync(targetPath)) {
+      console.log(chalk.yellow(`Skill already exists: ${targetPath}`));
+      return;
+    }
+
+    // Minimal template frontmatter + body (block-sequence YAML: the built-in
+    // parser handles `- item` lists but not inline `[]`)
+    const template = `---
+name: ${name}
+description: ${name} skill
+version: 1.0.0
+triggers:
+  -
+---
+
+# Instructions for ${name}
+
+Add your skill instructions here.`;
+    writeFileSync(targetPath, template, 'utf-8');
+    console.log(chalk.green(`Created skill: ${targetPath}`));
+
+    // Reload registry to pick up the new skill
+    this.skillRegistry!.reloadAll();
+    console.log(chalk.gray('SkillRegistry reloaded.'));
   }
 
   private handleSkillsCreate(name: string): void {
@@ -637,14 +676,106 @@ Examples:
       console.log(chalk.yellow('Skills not configured. Enable in config: skills.enabled = true'));
       return;
     }
-    const all = this.skillRegistry.getAll();
-    const dir = all.length > 0
-      ? require('node:path').dirname(all[0]!.filePath)
-      : '.agent-v2/skills';
-    console.log(chalk.yellow(`Create skill ${name} in ${dir}/${name}.md (not yet implemented)`));
+    const config = this.getConfigManager().get();
+    const paths = config.skills?.paths ?? ['.agent-v2/skills', '~/.agent-v2/skills'];
+    const raw = paths[0] ?? '.agent-v2/skills';
+    const firstPath = raw.startsWith('~/')
+      ? join(homedir(), raw.slice(2))
+      : raw;
+
+    mkdirSync(firstPath, { recursive: true });
+    const targetPath = join(firstPath, `${name}.md`);
+
+    if (existsSync(targetPath)) {
+      console.log(chalk.yellow(`Skill already exists: ${targetPath}`));
+      console.log(chalk.gray('Opening in editor...'));
+    } else {
+      // Minimal template. NOTE: frontmatter must sit flush-left; the built-in
+      // YAML parser reads `key: value` lines and `- item` sequences.
+      const template = [
+        '---',
+        `name: ${name}`,
+        `description: ${name} skill`,
+        'version: 1.0.0',
+        'triggers:',
+        '---',
+        '',
+        `# Instructions for ${name}`,
+        '',
+        'Add your skill instructions here.',
+      ].join('\n');
+      writeFileSync(targetPath, template, 'utf-8');
+      console.log(chalk.green(`Created skill: ${targetPath}`));
+    }
+
+    // Open in editor (interactive sessions only; skip silently when piped)
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const editor = process.env['EDITOR'] || process.env['VISUAL'] || 'code';
+      const child = spawn(editor, [targetPath], { stdio: 'inherit' });
+      child.on('error', () => {
+        console.log(chalk.gray(`(Could not launch '${editor}' — edit ${targetPath} manually.)`));
+        this.skillRegistry?.reloadAll();
+      });
+      child.on('exit', () => {
+        console.log(chalk.gray('Reloading skill registry...'));
+        this.skillRegistry?.reloadAll();
+      });
+    } else {
+      console.log(chalk.gray(`Edit it at: ${targetPath}`));
+      this.skillRegistry?.reloadAll();
+    }
   }
 
-  private handleAgentCreate(name: string): void { console.log(chalk.yellow(`Agent create ${name} - not yet implemented`)); }
+  private handleAgentCreate(name: string): void {
+    const paths = AgentLoader.defaultPaths();
+    const raw = paths[0] ?? '.agent-v2/agents';
+    const firstPath = raw.startsWith('~/')
+      ? join(homedir(), raw.slice(2))
+      : raw;
+
+    mkdirSync(firstPath, { recursive: true });
+    const targetPath = join(firstPath, `${name}.md`);
+
+    if (existsSync(targetPath)) {
+      console.log(chalk.yellow(`Agent already exists: ${targetPath}`));
+      console.log(chalk.gray('Opening in editor...'));
+    } else {
+      // Create minimal agent template with frontmatter
+      const template = `---
+name: ${name}
+description: ${name} agent - describe when to use this agent
+tools: read, grep, bash
+denied-tools: write, edit
+model: inherit
+---
+
+You are a ${name} agent. Focus on your specific domain.
+
+When invoked:
+1. Analyze the task
+2. Use your allowed tools
+3. Report findings clearly`;
+      writeFileSync(targetPath, template, 'utf-8');
+      console.log(chalk.green(`Created agent: ${targetPath}`));
+    }
+
+    // Open in editor (interactive sessions only; skip silently when piped)
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const editor = process.env['EDITOR'] || process.env['VISUAL'] || 'code';
+      const child = spawn(editor, [targetPath], { stdio: 'inherit' });
+      child.on('error', () => {
+        console.log(chalk.gray(`(Could not launch '${editor}' — edit ${targetPath} manually.)`));
+        this.agentRegistry?.reloadAll();
+      });
+      child.on('exit', () => {
+        console.log(chalk.gray('Reloading agent registry...'));
+        this.agentRegistry?.reloadAll();
+      });
+    } else {
+      console.log(chalk.gray(`Edit it at: ${targetPath}`));
+      this.agentRegistry?.reloadAll();
+    }
+  }
 
   private handleMcpList(): void {
     if (!this.mcpManager) {
