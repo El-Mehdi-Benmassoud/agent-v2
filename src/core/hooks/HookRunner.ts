@@ -149,29 +149,65 @@ export class HookRunner {
 /**
  * The real spawner: runs the command with shell semantics, feeds the
  * event JSON on stdin, and enforces the timeout with TERM->KILL.
+ *
+ * `detached: true` puts the shell in its own process group so a timeout
+ * can kill the whole tree (shell + descendants). Without this, an orphaned
+ * grandchild keeps the stdio pipes open and `close` never fires — this
+ * exact hang was observed on Linux CI (macOS /bin/sh execs simple commands
+ * and masked the bug locally).
  */
 const realSpawn: HookSpawner = (command, input, timeoutMs, hook) => {
   return new Promise<HookOutcome>((resolve) => {
     const started = Date.now();
     const child = spawn(command, {
       shell: true,
+      detached: true,
       env: { ...process.env, ...(hook.env ?? {}) },
     });
+
+    const killGroup = (signal: 'SIGTERM' | 'SIGKILL'): void => {
+      if (child.pid === undefined) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // Group already gone (or never formed) — fall back to the child only.
+        try {
+          child.kill(signal);
+        } catch {
+          // Already dead — nothing to do.
+        }
+      }
+    };
 
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let settled = false;
 
+    const settle = (code: number | null, error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      resolve({
+        hook,
+        exitCode: code,
+        stdout,
+        stderr: error ? `${stderr}\n${error.message}` : stderr,
+        durationMs: Date.now() - started,
+        timedOut,
+      });
+    };
+
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!settled && child.exitCode === null) {
-          child.kill('SIGKILL');
-        }
+      killGroup('SIGTERM');
+      // Escalate to KILL if the group is still alive shortly after TERM.
+      killTimer = setTimeout(() => {
+        if (!settled) killGroup('SIGKILL');
       }, 1_000);
     }, timeoutMs);
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
 
     child.stdout?.on('data', (d: Buffer) => {
       stdout += d.toString();
@@ -181,33 +217,21 @@ const realSpawn: HookSpawner = (command, input, timeoutMs, hook) => {
     });
 
     child.on('error', (err) => {
-      clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        resolve({
-          hook,
-          exitCode: null,
-          stdout,
-          stderr: err.message,
-          durationMs: Date.now() - started,
-          timedOut: false,
-        });
-      }
+      settle(null, err);
+    });
+
+    // `exit` (not just `close`) is the settlement backstop: if a grandchild
+    // inherits the pipes and keeps them open after the shell dies, `close`
+    // would hang but `exit` still fires.
+    child.on('exit', (code) => {
+      settle(code);
+      // Belt and braces: after the group leader is dead, nuke any survivors
+      // so nothing outlives the run in the detached group.
+      killGroup('SIGKILL');
     });
 
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (!settled) {
-        settled = true;
-        resolve({
-          hook,
-          exitCode: code,
-          stdout,
-          stderr,
-          durationMs: Date.now() - started,
-          timedOut,
-        });
-      }
+      settle(code);
     });
 
     // Feed the hook its JSON input and close stdin so it can read EOF.
